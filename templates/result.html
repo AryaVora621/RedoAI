@@ -3,24 +3,20 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Conversion Result</title>
+    <title>Summary Result</title>
 </head>
 <body>
-    <h1>PDF to MP3 Conversion Completed!</h1>
-
-    <p><strong>Extracted Text:</strong></p>
-    <textarea rows="10" cols="50" readonly>{{ text }}</textarea>
-
-    <h2>Summary:</h2>
-    <textarea rows="10" cols="50" readonly>{{ summarized_text }}</textarea>
-
-    <h2>MP3 Output (Summary):</h2>
+    <h1>Summary</h1>
+    <p><strong>Original Text (extracted from PDF):</strong></p>
+    <p>{{ text }}</p>
+    
+    <p><strong>Summary:</strong></p>
+    <p>{{ text }}</p>
+    
+    <p><strong>Download the MP3 summary:</strong></p>
     <audio controls>
-        <source src="{{ url_for('download_file', filename=mp3_filename) }}" type="audio/mp3">
-        Your browser does not support the audio element.
-    </audio>
-
-    <br>
-    <a href="/">Go back</a>
+        <source src="{{ url_for('download_file', filename=mp3_file) }}" type="audio/mp3">
+    </audio><br>
+    <a href="{{ url_for('download_file', filename=mp3_file) }}" download>Download MP3</a>
 </body>
 </html>

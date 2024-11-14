@@ -1,93 +1,108 @@
-from flask import Flask, render_template, request, send_from_directory
+from flask import Flask, request, render_template, send_from_directory
+from transformers import pipeline, BartTokenizer
+from gtts import gTTS
 import os
-import gtts
-import openai
-from PyPDF2 import PdfReader
+import fitz  # PyMuPDF
+import re
 
 app = Flask(__name__)
 
-# Configure the folder for uploaded files
-UPLOAD_FOLDER = 'uploads'  # Folder where PDF and MP3 will be stored
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-
-# Create uploads folder if it doesn't exist
+# Path for saving files
+UPLOAD_FOLDER = 'uploads'
+MP3_FOLDER = 'static/mp3'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(MP3_FOLDER, exist_ok=True)
 
-# OpenAI API key
-openai.api_key = "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"
+# Load the summarizer model and tokenizer
+summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-12-6")
+tokenizer = BartTokenizer.from_pretrained("sshleifer/distilbart-cnn-12-6")
 
-# Home page route
+# Max token length for DistilBART model (approx. 1024 tokens)
+MAX_INPUT_TOKENS = 1024
+
+# Home route for file upload form
 @app.route('/')
 def index():
     return render_template('index.html')
 
-# Route to handle PDF file upload and text-to-speech conversion
+# Route to handle PDF file upload and processing
 @app.route('/upload', methods=['POST'])
 def upload_pdf():
-    # Check if a file is present in the form
+    # Check if the post request has the file part
     if 'file' not in request.files:
-        return "No file part", 400
+        return 'No file part'
+    
     file = request.files['file']
     if file.filename == '':
-        return "No selected file", 400
-    if file and allowed_file(file.filename):
-        filename = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
-        file.save(filename)
+        return 'No selected file'
+    
+    # Save the uploaded PDF file
+    pdf_filename = os.path.join(UPLOAD_FOLDER, file.filename)
+    file.save(pdf_filename)
 
-        # Extract text from the PDF
-        pdf_text = extract_text_from_pdf(filename)
+    # Extract text from the uploaded PDF
+    pdf_text = extract_text_from_pdf(pdf_filename)
 
-        # Summarize the extracted text using OpenAI GPT-3
-        summarized_text = summarize_text(pdf_text)
+    # Split the text into manageable chunks if it exceeds MAX_INPUT_TOKENS
+    text_chunks = split_text_into_chunks(pdf_text)
 
-        # Convert the summarized text to speech and save as MP3
-        mp3_filename = 'output.mp3'
-        mp3_path = os.path.join(app.config['UPLOAD_FOLDER'], mp3_filename)
-        try:
-            tts = gtts.gTTS(summarized_text)
-            tts.save(mp3_path)
-        except gtts.tts.gTTSError as e:
-            return f"Error in TTS: {e}", 500
+    # Summarize each chunk and combine the results
+    full_summary = ""
+    for chunk in text_chunks:
+        # Check token length before summarizing
+        tokenized_chunk = tokenizer(chunk, return_tensors="pt", truncation=True, padding=True)
+        if len(tokenized_chunk['input_ids'][0]) > MAX_INPUT_TOKENS:
+            return f"Chunk exceeds maximum token limit: {len(tokenized_chunk['input_ids'][0])} tokens."
 
-        # Return the result page with the MP3 file and both full and summarized text
-        return render_template('result.html', text=pdf_text, summarized_text=summarized_text, mp3_filename=mp3_filename)
+        summary = summarizer(chunk, max_length=150, min_length=50, do_sample=False)
+        full_summary += summary[0]['summary_text'] + " "
 
-    return "Invalid file type", 400
+    # Create the MP3 file from the combined summary text
+    mp3_filename = f'{os.path.splitext(file.filename)[0]}_summary.mp3'
+    mp3_path = os.path.join(MP3_FOLDER, mp3_filename)
+    tts = gTTS(full_summary)
+    tts.save(mp3_path)
 
-# Helper function to extract text from a PDF
-def extract_text_from_pdf(pdf_file):
-    pdf_reader = PdfReader(pdf_file)
+    # Return the result page with the summary and mp3 download link
+    return render_template('result.html', text=full_summary, mp3_file=mp3_filename)
+
+# Extract text from a PDF using PyMuPDF
+def extract_text_from_pdf(pdf_filename):
+    doc = fitz.open(pdf_filename)
     text = ""
-    for page in pdf_reader.pages:
-        text += page.extract_text()
+    for page in doc:
+        text += page.get_text("text")
     return text
 
-# Helper function to check if the uploaded file is a PDF
-def allowed_file(filename):
-    return filename.lower().endswith('.pdf')
+# Split large text into smaller chunks based on the model's token limit
+def split_text_into_chunks(text):
+    # Split the text by sentences using regex
+    sentences = re.split(r'(?<=[.!?]) +', text)
+    chunks = []
+    current_chunk = ""
 
-# Helper function to summarize the extracted PDF text using OpenAI GPT-3
-def summarize_text(text):
-    try:
-        # Use the new ChatCompletion API for summarization
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",  # You can use "gpt-4" if you have access
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": f"Please summarize the following text:\n\n{text}"}
-            ],
-            max_tokens=300,  # Limit the summary length
-            temperature=0.7
-        )
-        summarized_text = response['choices'][0]['message']['content'].strip()
-        return summarized_text
-    except Exception as e:
-        return f"Error in summarizing: {e}"
+    for sentence in sentences:
+        # Check the token length of the current chunk + next sentence
+        potential_chunk = current_chunk + " " + sentence
+        tokenized_potential_chunk = tokenizer(potential_chunk, return_tensors="pt", truncation=True, padding=True)
+        
+        if len(tokenized_potential_chunk['input_ids'][0]) <= MAX_INPUT_TOKENS:
+            current_chunk = potential_chunk
+        else:
+            # If it exceeds, add the current chunk to the list and start a new one
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+            current_chunk = sentence
+    
+    if current_chunk:
+        chunks.append(current_chunk.strip())
 
-# Route to download the MP3 file
+    return chunks
+
+# Route to download the generated MP3 file
 @app.route('/download/<filename>')
 def download_file(filename):
-    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+    return send_from_directory(MP3_FOLDER, filename)
 
 if __name__ == '__main__':
     app.run(debug=True, port=6969)
